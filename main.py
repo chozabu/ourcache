@@ -1,31 +1,72 @@
-import asyncio
-from kademlia.network import Server
-import platform
-from PyQt6.QtWidgets import *
+"""Decentralized chat example"""
+try:
+    raw_input
+except NameError:
+    raw_input = input
 
-if platform.system()=='Windows':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+import argparse
+import os
+from threading import Thread
 
-async def run():
-    # Create a node and start listening on port 5678
-    node = Server()
-    await node.listen(5678)
+# dependency, not in stdlib
+from netifaces import interfaces, ifaddresses, AF_INET
 
-    # Bootstrap the node by connecting to other known nodes, in this case
-    # replace 123.123.123.123 with the IP of another node and optionally
-    # give as many ip/port combos as you can for other nodes.
-    await node.bootstrap([("127.0.0.1", 5678)])
+import zmq
 
-    # set a value for the key "my-key" on the network
-    await node.set("my-key", "my awesome value")
 
-    # get the value associated with "my-key" from the network
-    result = await node.get("my-key")
-    print(result)
+def listen(masked):
+    """listen for messages
 
-    app = QApplication([])
-    label = QLabel(result)
-    label.show()
-    app.exec()
+    masked is the first three parts of an IP address:
 
-asyncio.run(run())
+        192.168.1
+
+    The socket will connect to all of X.Y.Z.{1-254}.
+    """
+    ctx = zmq.Context.instance()
+    listener = ctx.socket(zmq.SUB)
+    for last in range(1, 255):
+        listener.connect("tcp://{0}.{1}:9000".format(masked, last))
+
+    listener.setsockopt(zmq.SUBSCRIBE, b'')
+    while True:
+        try:
+            print(listener.recv_string())
+        except (KeyboardInterrupt, zmq.ContextTerminated):
+            break
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("interface", type=str, help="the network interface",
+                        choices=interfaces(),
+                        )
+    parser.add_argument("user", type=str, default=os.environ['USER'],
+                        nargs='?',
+                        help="Your username",
+                        )
+    args = parser.parse_args()
+    inet = ifaddresses(args.interface)[AF_INET]
+    addr = inet[0]['addr']
+    masked = addr.rsplit('.', 1)[0]
+
+    ctx = zmq.Context.instance()
+
+    listen_thread = Thread(target=listen, args=(masked,))
+    listen_thread.start()
+
+    bcast = ctx.socket(zmq.PUB)
+    bcast.bind("tcp://%s:9000" % args.interface)
+    print("starting chat on %s:9000 (%s.*)" % (args.interface, masked))
+    while True:
+        try:
+            msg = raw_input()
+            bcast.send_string("%s: %s" % (args.user, msg))
+        except KeyboardInterrupt:
+            break
+    bcast.close(linger=0)
+    ctx.term()
+
+
+if __name__ == '__main__':
+    main()
